@@ -1,0 +1,52 @@
+{
+  "name": "@boof2015/astra-signal",
+  "version": "0.3.0",
+  "description": "Encode song metadata into a scannable, service-agnostic audio-spectrum barcode (Astra Signal)",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "SPEC.md"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Boof2015/astra-signal.git"
+  },
+  "keywords": [
+    "music",
+    "barcode",
+    "astra",
+    "signal",
+    "spectrum"
+  ],
+  "author": "Boof2015",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.12.12",
+    "tsup": "^8.0.2",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  },
+  "bugs": {
+    "url": "https://github.com/Boof2015/astra-signal/issues"
+  },
+  "homepage": "https://github.com/Boof2015/astra-signal#readme"
+}
