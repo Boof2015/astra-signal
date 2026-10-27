@@ -144,12 +144,14 @@ function adaptiveBinary(gray: Uint8Array, width: number, height: number): Uint8A
 
 function connectedComponents(binary: Uint8Array, width: number, height: number): Blob[] {
   const visited = new Uint8Array(binary.length);
-  const stack: number[] = [];
+  let stack = new Int32Array(4096);
   const blobs: Blob[] = [];
+  const lastX = width - 1;
+  const lastY = height - 1;
   for (let start = 0; start < binary.length; start++) {
-    if (binary[start] !== 1 || visited[start]) continue;
-    stack.length = 0;
-    stack.push(start);
+    if (binary[start] !== 1 || visited[start] === 1) continue;
+    let top = 0;
+    stack[top++] = start;
     visited[start] = 1;
     let area = 0;
     let sumX = 0;
@@ -169,36 +171,50 @@ function connectedComponents(binary: Uint8Array, width: number, height: number):
     let tr: Point = [0, 0];
     let bl: Point = [0, 0];
     let br: Point = [0, 0];
-    while (stack.length) {
-      const pixel = stack.pop()!;
-      const x = pixel % width;
-      const y = (pixel - x) / width;
+    while (top > 0) {
+      const pixel = stack[--top]!;
+      const y = (pixel / width) | 0;
+      const x = pixel - y * width;
       area++;
       sumX += x;
       sumY += y;
       sumXX += x * x;
       sumYY += y * y;
       sumXY += x * y;
-      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
-      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
       const sum = x + y;
       const diff = x - y;
       if (sum < minSum) { minSum = sum; tl = [x, y]; }
       if (sum > maxSum) { maxSum = sum; br = [x, y]; }
       if (diff > maxDiff) { maxDiff = diff; tr = [x, y]; }
       if (diff < minDiff) { minDiff = diff; bl = [x, y]; }
-      for (let dy = -1; dy <= 1; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          if (dx === 0 && dy === 0) continue;
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
-          const neighbor = ny * width + nx;
-          if (binary[neighbor] === 1 && !visited[neighbor]) {
-            visited[neighbor] = 1;
-            stack.push(neighbor);
-          }
-        }
+      // Unrolled 8-neighbor flood fill: Hermes has no JIT, so per-pixel helper
+      // calls dominate. Push order (row above, own row, row below; left to
+      // right) matches the original loop so tied blob corners resolve the same.
+      if (top + 8 > stack.length) {
+        const grown = new Int32Array(stack.length * 2);
+        grown.set(stack);
+        stack = grown;
+      }
+      const left = x > 0;
+      const right = x < lastX;
+      let n: number;
+      if (y > 0) {
+        const row = pixel - width;
+        if (left) { n = row - 1; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; } }
+        n = row; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; }
+        if (right) { n = row + 1; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; } }
+      }
+      if (left) { n = pixel - 1; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; } }
+      if (right) { n = pixel + 1; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; } }
+      if (y < lastY) {
+        const row = pixel + width;
+        if (left) { n = row - 1; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; } }
+        n = row; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; }
+        if (right) { n = row + 1; if (binary[n] === 1 && visited[n] === 0) { visited[n] = 1; stack[top++] = n; } }
       }
     }
     blobs.push({ area, sumX, sumY, sumXX, sumYY, sumXY, minX, maxX, minY, maxY, tl, tr, bl, br });
@@ -395,7 +411,7 @@ function candidateQuads(isForeground: ForegroundTest, blob: Blob): Point[][] {
   ];
 }
 
-function sampleCandidate(
+function candidateSampler(
   foreground: ForegroundTest,
   width: number,
   height: number,
@@ -403,7 +419,7 @@ function sampleCandidate(
   tierName: SignalTier,
   centerOffset = 0,
   horizontalWarp = 0
-): SampledColumn[] | null {
+): ((index: number) => SampledColumn) | null {
   const tier = tierSpec(tierName);
   const g = SIGNAL_SPEC.geom;
   const canonicalWidth = signalWidthModules(tier);
@@ -444,16 +460,13 @@ function sampleCandidate(
     }
     return best;
   };
-  const totalColumns = tier.dataColumns + g.guardColumnsPerSide * 2;
-  const columns: SampledColumn[] = [];
-  for (let index = 0; index < totalColumns; index++) {
+  return (index) => {
     const centerX = g.quietModules + (index + 0.5) * g.columnPitchModules;
     const offsets = [-0.25, 0, 0.25].map((fraction) => centerX + fraction * g.columnPitchModules);
     const uppers = offsets.map((x) => extent(x, -1)).sort((a, b) => a - b);
     const lowers = offsets.map((x) => extent(x, 1)).sort((a, b) => a - b);
-    columns.push({ upper: quantizeHeight(uppers[1]!), lower: quantizeHeight(lowers[1]!) });
-  }
-  return columns;
+    return { upper: quantizeHeight(uppers[1]!), lower: quantizeHeight(lowers[1]!) };
+  };
 }
 
 function oriented(columns: ReadonlyArray<SampledColumn>, reverse: boolean): SampledColumn[] {
@@ -598,16 +611,20 @@ export function decodeSignalImage(image: DecodeImage, options: DecodeOptions = {
       const tiers = SIGNAL_SPEC.tiers
         .map((tier) => tier.name)
         .sort((a, b) => aspectScore(blob, a) - aspectScore(blob, b));
+      // Quads depend only on the blob, not the tier being tried.
+      const quads = candidateQuads(foreground, blob);
+      const guards = SIGNAL_SPEC.geom.guardColumnsPerSide;
       for (const tier of tiers) {
+        const totalColumns = tierSpec(tier).dataColumns + guards * 2;
         // Refine the center axis around the guard-derived homography. Sub-pixel
         // offsets absorb slight silhouette/threshold asymmetry without relaxing
         // any of the frame, guard, RS, or CRC validity checks.
-        for (const quad of candidateQuads(foreground, blob)) {
+        for (const quad of quads) {
           for (const centerOffset of [0, -0.5, 0.5, -1, 1]) {
             let retryWithWarp = false;
             for (const horizontalWarp of [0, -0.04, 0.04, -0.08, 0.08]) {
               if (horizontalWarp !== 0 && !retryWithWarp) break;
-              const sampled = sampleCandidate(
+              const sample = candidateSampler(
                 foreground,
                 image.width,
                 image.height,
@@ -616,13 +633,27 @@ export function decodeSignalImage(image: DecodeImage, options: DecodeOptions = {
                 centerOffset,
                 horizontalWarp
               );
-              if (!sampled) continue;
-              for (const reverse of [false, true]) {
-                const columns = oriented(sampled, reverse);
-                const mismatch = guardMismatch(columns, tier);
+              if (!sample) continue;
+              // Guards decide most hypotheses; sample them before the data.
+              const guardColumns: SampledColumn[] = [];
+              for (let index = 0; index < guards; index++) guardColumns.push(sample(index));
+              for (let index = totalColumns - guards; index < totalColumns; index++) guardColumns.push(sample(index));
+              const mismatches = [false, true].map((reverse) => guardMismatch(oriented(guardColumns, reverse), tier));
+              for (const mismatch of mismatches) {
                 diagnostic.bestGuardMismatch = diagnostic.bestGuardMismatch === null
                   ? mismatch
                   : Math.min(diagnostic.bestGuardMismatch, mismatch);
+              }
+              if (mismatches[0]! > 3 && mismatches[1]! > 3) continue;
+              const sampled: SampledColumn[] = [];
+              for (let index = 0; index < totalColumns; index++) {
+                if (index < guards) sampled.push(guardColumns[index]!);
+                else if (index >= totalColumns - guards) sampled.push(guardColumns[index - totalColumns + guards * 2]!);
+                else sampled.push(sample(index));
+              }
+              for (const reverse of [false, true]) {
+                const columns = oriented(sampled, reverse);
+                const mismatch = mismatches[reverse ? 1 : 0]!;
                 if (mismatch > 3) continue;
                 diagnostic.guardMatches++;
                 diagnostic.decodeAttempts++;
